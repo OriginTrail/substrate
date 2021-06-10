@@ -45,7 +45,10 @@ pub enum Command {
 	OnRuntimeUpgrade(OnRuntimeUpgradeCmd),
 	/// Execute "OffchainWorkerApi_offchain_worker" against the given runtime state.
 	OffchainWorker(OffchainWorkerCmd),
+	/// Execute "Core_execute_block" using the given block and the runtime state of the parent block.
+	ExecuteBlock(ExecuteBlockCmd),
 }
+
 
 #[derive(Debug, Clone, structopt::StructOpt)]
 pub struct OnRuntimeUpgradeCmd {
@@ -62,6 +65,18 @@ pub struct OffchainWorkerCmd {
 	#[structopt(subcommand)]
 	pub state: State,
 
+	/// Whether or not to overwrite the code from state with the code from
+	/// the specified chain spec.
+	#[structopt(long)]
+	pub overwrite_code: bool,
+}
+
+#[derive(Debug, Clone, structopt::StructOpt)]
+pub struct ExecuteBlockCmd {
+	#[structopt(subcommand)]
+	pub state: State,
+
+	/// todo probs remove
 	/// Whether or not to overwrite the code from state with the code from
 	/// the specified chain spec.
 	#[structopt(long)]
@@ -283,6 +298,7 @@ where
 				// https://github.com/paritytech/substrate/issues/9027
 				// This assumes you have a node running on local host default
 				let url = "ws://127.0.0.1:9944".to_string();
+				let url = "ws://34.76.127.212:9944".to_string();
 				let mode = Mode::Offline(OfflineConfig {
 					state_snapshot: SnapshotConfig::new(snapshot_path),
 				});
@@ -333,7 +349,7 @@ where
 
 async fn execute_block<Block, ExecDispatch>(
 	shared: SharedParams,
-	command: OffchainWorkerCmd,
+	command: ExecuteBlockCmd,
 	config: Configuration,
 )-> sc_cli::Result<()>
 where
@@ -379,7 +395,6 @@ where
 				at: Some(*parent_hash),
 				..Default::default()
 			});
-
 			let builder = Builder::<Block>::new().mode(mode);
 			let mut ext = if command.overwrite_code {
 				let (code_key, code) = extract_code(config.chain_spec)?;
@@ -422,7 +437,7 @@ where
 impl TryRuntimeCmd {
 	pub async fn run<Block, ExecDispatch>(&self, config: Configuration) -> sc_cli::Result<()>
 	where
-		Block: BlockT,
+		Block: BlockT + serde::de::DeserializeOwned,
 		Block::Header: serde::de::DeserializeOwned,
 		Block::Hash: FromStr,
 		<Block::Hash as FromStr>::Err: Debug,
@@ -436,6 +451,9 @@ impl TryRuntimeCmd {
 			}
 			Command::OffchainWorker(cmd) => {
 				offchain_worker::<Block, ExecDispatch>(self.shared.clone(), cmd.clone(), config).await
+			}
+			Command::ExecuteBlock(cmd) => {
+				execute_block::<Block, ExecDispatch>(self.shared.clone(), cmd.clone(), config).await
 			}
 		}
 	}
