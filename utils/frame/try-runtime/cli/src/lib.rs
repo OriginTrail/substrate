@@ -25,7 +25,7 @@ use sc_executor::NativeExecutor;
 use sc_service::NativeExecutionDispatch;
 use sc_chain_spec::ChainSpec;
 use sp_state_machine::StateMachine;
-use sp_runtime::traits::{Block as BlockT, NumberFor};
+use sp_runtime::{generic::Header, traits::{Block as BlockT, NumberFor}};
 use sp_core::{
 	offchain::{
 		OffchainWorkerExt, OffchainDbExt, TransactionPoolExt,
@@ -225,6 +225,9 @@ where
 	Ok(())
 }
 
+/// 
+///
+/// "execute_block" is a useful logging target to watch.
 async fn offchain_worker<Block, ExecDispatch>(
 	shared: SharedParams,
 	command: OffchainWorkerCmd,
@@ -328,96 +331,96 @@ where
 	Ok(())
 }
 
-// async fn execute_block<Block, ExecDispatch>(
-// 	shared: SharedParams,
-// 	command: OffchainWorkerCmd,
-// 	config: Configuration,
-// )-> sc_cli::Result<()>
-// where
-// 	Block: BlockT,
-// 	Block::Hash: FromStr,
-// 	Block::Header: serde::de::DeserializeOwned,
-// 	<Block::Hash as FromStr>::Err: Debug,
-// 	NumberFor<Block>: FromStr,
-// 	<NumberFor<Block> as FromStr>::Err: Debug,
-// 	ExecDispatch: NativeExecutionDispatch + 'static,
-// {
-// 	let wasm_method = shared.wasm_method;
-// 	let execution = shared.execution;
-// 	let heap_pages = if shared.heap_pages.is_some() {
-// 		shared.heap_pages
-// 	} else {
-// 		config.default_heap_pages
-// 	};
+async fn execute_block<Block, ExecDispatch>(
+	shared: SharedParams,
+	command: OffchainWorkerCmd,
+	config: Configuration,
+)-> sc_cli::Result<()>
+where
+	Block: BlockT + serde::de::DeserializeOwned,
+	Block::Hash: FromStr,
+	// Block::Header: serde::de::DeserializeOwned,
+	<Block::Hash as FromStr>::Err: Debug,
+	NumberFor<Block>: FromStr,
+	<NumberFor<Block> as FromStr>::Err: Debug,
+	ExecDispatch: NativeExecutionDispatch + 'static,
+{
+	let wasm_method = shared.wasm_method;
+	let execution = shared.execution;
+	let heap_pages = if shared.heap_pages.is_some() {
+		shared.heap_pages
+	} else {
+		config.default_heap_pages
+	};
 
-// 	let mut changes = Default::default();
-// 	let max_runtime_instances = config.max_runtime_instances;
-// 	let executor = NativeExecutor::<ExecDispatch>::new(
-// 		wasm_method.into(),
-// 		heap_pages,
-// 		max_runtime_instances,
-// 	);
+	let mut changes = Default::default();
+	let max_runtime_instances = config.max_runtime_instances;
+	let executor = NativeExecutor::<ExecDispatch>::new(
+		wasm_method.into(),
+		heap_pages,
+		max_runtime_instances,
+	);
 
-// 	let (mode, url) = match command.state {
-// 		State::Live {
-// 			url,
-// 			snapshot_path,
-// 			block_at,
-// 			modules
-// 		} => {
-// 			let online_config = OnlineConfig {
-// 				transport: url.to_owned().into(),
-// 				state_snapshot: snapshot_path.as_ref().map(SnapshotConfig::new),
-// 				modules: modules.to_owned().unwrap_or_default(),
-// 				at: block_at.as_ref()
-// 					.map(|b| b.parse().map_err(|e| format!("Could not parse hash: {:?}", e))).transpose()?,
-// 				..Default::default()
-// 			};
+	let (ext, block)  =  {
+		if let State::Snap{ .. } = command.state {
+			return Err("`State::Snap` is not currently supported for execute-block.".into());
+		};
 
-// 			(Mode::Online(online_config), url)
-// 		},
-// 		State::Snap { snapshot_path } => {
-// 			// TODO This is a temporary hack; the url is used just to get the header. We should try
-// 			// and get the header out of state, OR use an arbitrary header if thats ok, OR allow
-// 			// the user to feed in a header via file.
-// 			// https://github.com/paritytech/substrate/issues/9027
-// 			// This assumes you have a node running on local host default
-// 			let url = "ws://127.0.0.1:9944".to_string();
-// 			let mode = Mode::Offline(OfflineConfig {
-// 				state_snapshot: SnapshotConfig::new(snapshot_path),
-// 			});
+		let State::Live { url, snapshot_path, block_at, modules } =  command.state;
+		let block_hash = block_at
+			.map(|h| h.as_ref().parse().map_err(|e| format!("Could not parse header hash: {:?}", e))?)
+			.ok_or("execute-block requires `block_at` option")?;
 
-// 			(mode, url)
-// 		}
-// 	};
+		let block: Block = rpc_api::get_block::<Block, _>(url, block_hash).await?;
+		let parent_hash = block.header().parent_hash();
+		// let parent_header = rpc_api::get_header_generic(url, parent_hash).await?;
 
-// 	let ext = {
-// 		let builder = Builder::<Block>::new().mode(mode);
-// 		let mut ext = if command.overwrite_code {
-// 			let (code_key, code) = extract_code(config.chain_spec)?;
-// 			builder.inject(&[(code_key, code)]).build().await?
-// 		} else {
-// 			builder.build().await?
-// 		};
+		let mode = Mode::Online(OnlineConfig {
+			transport: url.to_owned().into(),
+			state_snapshot: snapshot_path.as_ref().map(SnapshotConfig::new),
+			modules: modules.to_owned().unwrap_or_default(),
+			at: parent_hash.as_ref()
+				.map(|b| b.parse().map_err(|e| format!("Could not parse hash: {:?}", e))).transpose()?,
+			..Default::default()
+		});
 
-// 		// register externality extensions in order to provide host interface for OCW to the runtime.
-// 		let (offchain, _offchain_state) = TestOffchainExt::new();
-// 		let (pool, _pool_state) = TestTransactionPoolExt::new();
-// 		ext.register_extension(OffchainDbExt::new(offchain.clone()));
-// 		ext.register_extension(OffchainWorkerExt::new(offchain));
-// 		ext.register_extension(KeystoreExt(Arc::new(KeyStore::new())));
-// 		ext.register_extension(TransactionPoolExt::new(pool));
+		let builder = Builder::<Block>::new().mode(mode);
+		let mut ext = if command.overwrite_code {
+			let (code_key, code) = extract_code(config.chain_spec)?;
+			builder.inject(&[(code_key, code)]).build().await?
+		} else {
+			builder.build().await?
+		};
 
-// 		ext
-// 	}
+		// register externality extensions in order to provide host interface for OCW to the runtime.
+		let (offchain, _offchain_state) = TestOffchainExt::new();
+		let (pool, _pool_state) = TestTransactionPoolExt::new();
+		ext.register_extension(OffchainDbExt::new(offchain.clone()));
+		ext.register_extension(OffchainWorkerExt::new(offchain));
+		ext.register_extension(KeystoreExt(Arc::new(KeyStore::new())));
+		ext.register_extension(TransactionPoolExt::new(pool));
 
-// 	let header_hash: Block::Hash = command.header_at
-// 		.parse()
-// 		.map_err(|e| format!("Could not parse header hash: {:?}", e))?;
-// 	// let Block: Block = rpc_api::get_block::<Block, _>(url, header);
+		(ext, block)
+	};
 
-// 	Ok(())
-// }
+	let _ = StateMachine::<_, _, NumberFor<Block>, _>::new(
+		&ext.backend,
+		None,
+		&mut changes,
+		&executor,
+		"Core_execute_block",
+		block.encode().as_ref(),
+		ext.extensions,
+		&sp_state_machine::backend::BackendRuntimeCode::new(&ext.backend).runtime_code()?,
+		sp_core::testing::TaskExecutor::new(),
+	)
+	.execute(execution.into())
+	.map_err(|e| format!("failed to execute 'OffchainWorkerApi_offchain_worker' due to {:?}", e))?;
+
+	log::info!("OffchainWorkerApi_offchain_worker executed without errors.");
+
+	Ok(())
+}
 
 impl TryRuntimeCmd {
 	pub async fn run<Block, ExecDispatch>(&self, config: Configuration) -> sc_cli::Result<()>

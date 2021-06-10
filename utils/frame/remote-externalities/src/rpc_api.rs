@@ -18,8 +18,10 @@
 //! WS RPC API for one off RPC calls to a substrate node.
 // TODO: Consolidate one off RPC calls https://github.com/paritytech/substrate/issues/8988
 
-use sp_runtime::{generic::SignedBlock, traits::Block as BlockT};
+use sp_runtime::{generic::{SignedBlock, self}, traits::{Block as BlockT}};
 use jsonrpsee_ws_client::{WsClientBuilder, WsClient, v2::params::JsonRpcParams, traits::Client};
+
+type GenericBlock<Block: BlockT> = generic::Block<generic::Header<u32, Block::Hash>, Block::Extrinsic>;
 
 /// Get the header of the block identified by `at`
 pub async fn get_header<Block, S>(from: S, at: Block::Hash) -> Result<Block::Header, String>
@@ -50,14 +52,16 @@ where
 }
 
 /// Get the signed block identified by `at`.
-pub async fn get_block<Block, S>(from: S, at: Block::Hash) -> Result<Block, String>
+pub async fn get_block_generic<Block, S>(from: S, at: Block::Hash) -> Result<GenericBlock<Block>, String>
 where
-	Block: BlockT + serde::de::DeserializeOwned,
 	S: AsRef<str>,
+	Block: BlockT + serde::de::DeserializeOwned,
+	Block::Hash: sp_runtime::traits::Hash,
 {
 	let params = vec![hash_to_json::<Block>(at)?];
 	let client = build_client(from).await?;
-	let signed_block = client.request::<SignedBlock<Block>>("chain_getBlock", JsonRpcParams::Array(params))
+	let signed_block = client
+		.request::<SignedBlock<GenericBlock<Block>>>("chain_getBlock", JsonRpcParams::Array(params))
 		.await
 		.map_err(|e| format!("chain_getBlock request failed due to {:?}", e))?;
 
