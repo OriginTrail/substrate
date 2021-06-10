@@ -25,7 +25,7 @@ use sc_executor::NativeExecutor;
 use sc_service::NativeExecutionDispatch;
 use sc_chain_spec::ChainSpec;
 use sp_state_machine::StateMachine;
-use sp_runtime::{generic::Header, traits::{Block as BlockT, NumberFor}};
+use sp_runtime::traits::{Block as BlockT, NumberFor, Header as HeaderT};
 use sp_core::{
 	offchain::{
 		OffchainWorkerExt, OffchainDbExt, TransactionPoolExt,
@@ -339,7 +339,7 @@ async fn execute_block<Block, ExecDispatch>(
 where
 	Block: BlockT + serde::de::DeserializeOwned,
 	Block::Hash: FromStr,
-	// Block::Header: serde::de::DeserializeOwned,
+	Block::Header: serde::de::DeserializeOwned,
 	<Block::Hash as FromStr>::Err: Debug,
 	NumberFor<Block>: FromStr,
 	<NumberFor<Block> as FromStr>::Err: Debug,
@@ -361,46 +361,43 @@ where
 		max_runtime_instances,
 	);
 
-	let (ext, block)  =  {
-		if let State::Snap{ .. } = command.state {
-			return Err("`State::Snap` is not currently supported for execute-block.".into());
-		};
+	let (ext, block)  = 	match command.state {
+		State::Snap{ .. } => return Err("`State::Snap` is not currently supported for execute-block.".into()),
+		State::Live { url, snapshot_path, block_at, modules } => {
+			let block_hash: Block::Hash = block_at
+				.ok_or("execute-block requires `block_at` option")?
+				.parse()
+				.map_err(|e| format!("Could not parse hash: {:?}", e))?;
 
-		let State::Live { url, snapshot_path, block_at, modules } =  command.state;
-		let block_hash = block_at
-			.map(|h| h.as_ref().parse().map_err(|e| format!("Could not parse header hash: {:?}", e))?)
-			.ok_or("execute-block requires `block_at` option")?;
+			let block: Block = rpc_api::get_block::<Block, _>(url.clone(), block_hash).await?;
+			let parent_hash = block.header().parent_hash();
 
-		let block: Block = rpc_api::get_block::<Block, _>(url, block_hash).await?;
-		let parent_hash = block.header().parent_hash();
-		// let parent_header = rpc_api::get_header_generic(url, parent_hash).await?;
+			let mode = Mode::Online(OnlineConfig {
+				transport: url.to_owned().into(),
+				state_snapshot: snapshot_path.as_ref().map(SnapshotConfig::new),
+				modules: modules.to_owned().unwrap_or_default(),
+				at: Some(*parent_hash),
+				..Default::default()
+			});
 
-		let mode = Mode::Online(OnlineConfig {
-			transport: url.to_owned().into(),
-			state_snapshot: snapshot_path.as_ref().map(SnapshotConfig::new),
-			modules: modules.to_owned().unwrap_or_default(),
-			at: parent_hash.as_ref()
-				.map(|b| b.parse().map_err(|e| format!("Could not parse hash: {:?}", e))).transpose()?,
-			..Default::default()
-		});
+			let builder = Builder::<Block>::new().mode(mode);
+			let mut ext = if command.overwrite_code {
+				let (code_key, code) = extract_code(config.chain_spec)?;
+				builder.inject(&[(code_key, code)]).build().await?
+			} else {
+				builder.build().await?
+			};
 
-		let builder = Builder::<Block>::new().mode(mode);
-		let mut ext = if command.overwrite_code {
-			let (code_key, code) = extract_code(config.chain_spec)?;
-			builder.inject(&[(code_key, code)]).build().await?
-		} else {
-			builder.build().await?
-		};
+			// register externality extensions in order to provide host interface for OCW to the runtime.
+			let (offchain, _offchain_state) = TestOffchainExt::new();
+			let (pool, _pool_state) = TestTransactionPoolExt::new();
+			ext.register_extension(OffchainDbExt::new(offchain.clone()));
+			ext.register_extension(OffchainWorkerExt::new(offchain));
+			ext.register_extension(KeystoreExt(Arc::new(KeyStore::new())));
+			ext.register_extension(TransactionPoolExt::new(pool));
 
-		// register externality extensions in order to provide host interface for OCW to the runtime.
-		let (offchain, _offchain_state) = TestOffchainExt::new();
-		let (pool, _pool_state) = TestTransactionPoolExt::new();
-		ext.register_extension(OffchainDbExt::new(offchain.clone()));
-		ext.register_extension(OffchainWorkerExt::new(offchain));
-		ext.register_extension(KeystoreExt(Arc::new(KeyStore::new())));
-		ext.register_extension(TransactionPoolExt::new(pool));
-
-		(ext, block)
+			(ext, block)
+		}
 	};
 
 	let _ = StateMachine::<_, _, NumberFor<Block>, _>::new(
@@ -415,9 +412,9 @@ where
 		sp_core::testing::TaskExecutor::new(),
 	)
 	.execute(execution.into())
-	.map_err(|e| format!("failed to execute 'OffchainWorkerApi_offchain_worker' due to {:?}", e))?;
+	.map_err(|e| format!("failed to execute 'Core_execute_block' due to {:?}", e))?;
 
-	log::info!("OffchainWorkerApi_offchain_worker executed without errors.");
+	log::info!("Core_execute_block executed without errors.");
 
 	Ok(())
 }
